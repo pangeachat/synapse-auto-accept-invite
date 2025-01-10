@@ -1,3 +1,10 @@
+# This repository is no longer maintained!
+
+For users of Element Synapse v1.109.0 or later, this functionality is now directly integrated into Synapse and does not need an external module.
+See [the Synapse configuration manual](https://element-hq.github.io/synapse/v1.122/usage/configuration/config_documentation.html#auto_accept_invites) for more information.
+
+For users of earlier Synapse versions, this module should continue to work as-is.
+
 # Auto-accept invites
 
 Synapse module to automatically accept invites.
