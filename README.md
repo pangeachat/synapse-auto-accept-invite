@@ -35,6 +35,11 @@ modules:
       # Defaults to false.
       accept_invites_only_from_local_users: false
 
+      # Optional: if set to true, then only invites that has rooms requester last knocked 
+      # will be auto accepted.
+      # Defaults to false.
+      accept_invites_only_from_previously_knocked_rooms: false
+
       # (For workerised Synapse deployments)
       #
       # This module should only be active on a single worker process at once,
