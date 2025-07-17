@@ -417,16 +417,272 @@ class InviteAutoAccepterTestCase(aiounittest.AsyncTestCase):
         mocked_update_membership: Mock = module._api.update_room_membership  # type: ignore[assignment]
         mocked_update_membership.assert_not_called()
 
+    async def test_accept_invite_from_previously_knocked_user(self) -> None:
+        """Tests that, if the module is configured to only accept invites from users who previously
+        knocked, invites from users who have knocked are automatically accepted.
+        """
+        module = create_module(
+            config_override={"accept_invites_only_from_previously_knocked_rooms": True},
+        )
+
+        # Mock the get_room_state_events method to return a knock event
+        mocked_get_room_state_events: Mock = module._api.get_room_state_events  # type: ignore[attr-defined]
+        knock_event = MockEvent(
+            sender=self.user_id,
+            state_key=self.user_id,
+            type="m.room.member",
+            content={"membership": "knock"},
+        )
+        mocked_get_room_state_events.return_value = make_awaitable([knock_event])
+
+        mocked_update_membership: Mock = module._api.update_room_membership  # type: ignore[assignment]
+        join_event = MockEvent(
+            sender="someone",
+            state_key="someone",
+            type="m.room.member",
+            content={"membership": "join"},
+        )
+        mocked_update_membership.return_value = make_awaitable(join_event)
+
+        invite = MockEvent(
+            sender=self.user_id,
+            state_key=self.invitee,
+            type="m.room.member",
+            content={"membership": "invite"},
+        )
+
+        # Stop mypy from complaining that we give on_new_event a MockEvent rather than an
+        # EventBase.
+        await module.on_new_event(event=invite)  # type: ignore[arg-type]
+
+        # Verify that get_room_state_events was called to check knock history
+        mocked_get_room_state_events.assert_called_once_with(
+            invite.room_id, event_type="m.room.member", state_key=invite.sender
+        )
+
+        await self.retry_assertions(
+            mocked_update_membership,
+            1,
+            sender=invite.state_key,
+            target=invite.state_key,
+            room_id=invite.room_id,
+            new_membership="join",
+        )
+
+    async def test_ignore_invite_from_user_who_never_knocked(self) -> None:
+        """Tests that, if the module is configured to only accept invites from users who previously
+        knocked, invites from users who have not knocked are ignored.
+        """
+        module = create_module(
+            config_override={"accept_invites_only_from_previously_knocked_rooms": True},
+        )
+
+        # Mock the get_room_state_events method to return no knock events
+        mocked_get_room_state_events: Mock = module._api.get_room_state_events  # type: ignore[attr-defined]
+        join_event = MockEvent(
+            sender=self.user_id,
+            state_key=self.user_id,
+            type="m.room.member",
+            content={"membership": "join"},
+        )
+        mocked_get_room_state_events.return_value = make_awaitable([join_event])
+
+        invite = MockEvent(
+            sender=self.user_id,
+            state_key=self.invitee,
+            type="m.room.member",
+            content={"membership": "invite"},
+        )
+
+        # Stop mypy from complaining that we give on_new_event a MockEvent rather than an
+        # EventBase.
+        await module.on_new_event(event=invite)  # type: ignore[arg-type]
+
+        # Verify that get_room_state_events was called to check knock history
+        mocked_get_room_state_events.assert_called_once_with(
+            invite.room_id, event_type="m.room.member", state_key=invite.sender
+        )
+
+        mocked_update_membership: Mock = module._api.update_room_membership  # type: ignore[assignment]
+        mocked_update_membership.assert_not_called()
+
+    async def test_ignore_invite_from_user_who_knocked_but_most_recent_is_not_knock(
+        self,
+    ) -> None:
+        """Tests that, if the module is configured to only accept invites from users who previously
+        knocked, invites from users who have knocked but whose most recent membership event is not
+        a knock (e.g., they left after knocking) are ignored.
+        """
+        module = create_module(
+            config_override={"accept_invites_only_from_previously_knocked_rooms": True},
+        )
+
+        # Mock the get_room_state_events method to return multiple events:
+        # First a knock event, then a leave event (most recent)
+        mocked_get_room_state_events: Mock = module._api.get_room_state_events  # type: ignore[attr-defined]
+
+        # Create a knock event with an earlier timestamp
+        knock_event = MockEvent(
+            sender=self.user_id,
+            state_key=self.user_id,
+            type="m.room.member",
+            content={"membership": "knock"},
+        )
+        # Add timestamp attribute to make it sortable
+        knock_event.origin_server_ts = 1000
+
+        # Create a leave event with a later timestamp (most recent)
+        leave_event = MockEvent(
+            sender=self.user_id,
+            state_key=self.user_id,
+            type="m.room.member",
+            content={"membership": "leave"},
+        )
+        # Add timestamp attribute to make it sortable
+        leave_event.origin_server_ts = 2000
+
+        # Return events in chronological order (knock first, then leave)
+        mocked_get_room_state_events.return_value = make_awaitable(
+            [knock_event, leave_event]
+        )
+
+        invite = MockEvent(
+            sender=self.user_id,
+            state_key=self.invitee,
+            type="m.room.member",
+            content={"membership": "invite"},
+        )
+
+        # Stop mypy from complaining that we give on_new_event a MockEvent rather than an
+        # EventBase.
+        await module.on_new_event(event=invite)  # type: ignore[arg-type]
+
+        # Verify that get_room_state_events was called to check knock history
+        mocked_get_room_state_events.assert_called_once_with(
+            invite.room_id, event_type="m.room.member", state_key=invite.sender
+        )
+
+        # The invite should be ignored because the most recent event is not a knock
+        mocked_update_membership: Mock = module._api.update_room_membership  # type: ignore[assignment]
+        mocked_update_membership.assert_not_called()
+
+    async def test_ignore_invite_from_user_who_never_knocked_empty_history(
+        self,
+    ) -> None:
+        """Tests that, if the module is configured to only accept invites from users who previously
+        knocked, invites from users with no membership history are ignored.
+        """
+        module = create_module(
+            config_override={"accept_invites_only_from_previously_knocked_rooms": True},
+        )
+
+        # Mock the get_room_state_events method to return no events
+        mocked_get_room_state_events: Mock = module._api.get_room_state_events  # type: ignore[attr-defined]
+        mocked_get_room_state_events.return_value = make_awaitable([])
+
+        invite = MockEvent(
+            sender=self.user_id,
+            state_key=self.invitee,
+            type="m.room.member",
+            content={"membership": "invite"},
+        )
+
+        # Stop mypy from complaining that we give on_new_event a MockEvent rather than an
+        # EventBase.
+        await module.on_new_event(event=invite)  # type: ignore[arg-type]
+
+        # Verify that get_room_state_events was called to check knock history
+        mocked_get_room_state_events.assert_called_once_with(
+            invite.room_id, event_type="m.room.member", state_key=invite.sender
+        )
+
+        mocked_update_membership: Mock = module._api.update_room_membership  # type: ignore[assignment]
+        mocked_update_membership.assert_not_called()
+
+    async def test_handle_get_room_state_events_exception(self) -> None:
+        """Tests that if get_room_state_events raises an exception, the invite is ignored
+        when knock-only mode is enabled (erring on the side of caution).
+        """
+        module = create_module(
+            config_override={"accept_invites_only_from_previously_knocked_rooms": True},
+        )
+
+        # Mock the get_room_state_events method to raise an exception
+        mocked_get_room_state_events: Mock = module._api.get_room_state_events  # type: ignore[attr-defined]
+        mocked_get_room_state_events.side_effect = Exception("Database error")
+
+        invite = MockEvent(
+            sender=self.user_id,
+            state_key=self.invitee,
+            type="m.room.member",
+            content={"membership": "invite"},
+        )
+
+        # Stop mypy from complaining that we give on_new_event a MockEvent rather than an
+        # EventBase.
+        await module.on_new_event(event=invite)  # type: ignore[arg-type]
+
+        # Verify that get_room_state_events was called to check knock history
+        mocked_get_room_state_events.assert_called_once_with(
+            invite.room_id, event_type="m.room.member", state_key=invite.sender
+        )
+
+        mocked_update_membership: Mock = module._api.update_room_membership  # type: ignore[assignment]
+        mocked_update_membership.assert_not_called()
+
+    async def test_accept_invite_when_knock_check_disabled(self) -> None:
+        """Tests that invites are accepted normally when knock checking is disabled."""
+        module = create_module(
+            config_override={
+                "accept_invites_only_from_previously_knocked_rooms": False
+            },
+        )
+
+        mocked_update_membership: Mock = module._api.update_room_membership  # type: ignore[assignment]
+        join_event = MockEvent(
+            sender="someone",
+            state_key="someone",
+            type="m.room.member",
+            content={"membership": "join"},
+        )
+        mocked_update_membership.return_value = make_awaitable(join_event)
+
+        invite = MockEvent(
+            sender=self.user_id,
+            state_key=self.invitee,
+            type="m.room.member",
+            content={"membership": "invite"},
+        )
+
+        # Stop mypy from complaining that we give on_new_event a MockEvent rather than an
+        # EventBase.
+        await module.on_new_event(event=invite)  # type: ignore[arg-type]
+
+        # Verify that get_room_state_events was NOT called when knock checking is disabled
+        mocked_get_room_state_events: Mock = module._api.get_room_state_events  # type: ignore[attr-defined]
+        mocked_get_room_state_events.assert_not_called()
+
+        await self.retry_assertions(
+            mocked_update_membership,
+            1,
+            sender=invite.state_key,
+            target=invite.state_key,
+            room_id=invite.room_id,
+            new_membership="join",
+        )
+
     def test_config_parse(self) -> None:
         """Tests that a correct configuration passes parse_config."""
         config = {
             "accept_invites_only_for_direct_messages": True,
             "accept_invites_only_from_local_users": True,
+            "accept_invites_only_from_previously_knocked_rooms": True,
         }
         parsed_config = InviteAutoAccepter.parse_config(config)
 
         self.assertTrue(parsed_config.accept_invites_only_for_direct_messages)
         self.assertTrue(parsed_config.accept_invites_only_from_local_users)
+        self.assertTrue(parsed_config.accept_invites_only_from_previously_knocked_rooms)
 
     def test_runs_on_only_one_worker(self) -> None:
         """

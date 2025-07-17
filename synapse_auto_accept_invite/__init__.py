@@ -25,6 +25,7 @@ ACCOUNT_DATA_DIRECT_MESSAGE_LIST = "m.direct"
 class InviteAutoAccepterConfig:
     accept_invites_only_for_direct_messages: bool = False
     accept_invites_only_from_local_users: bool = False
+    accept_invites_only_from_previously_knocked_rooms: bool = False
     worker_to_run_on: Optional[str] = None
 
 
@@ -70,12 +71,16 @@ class InviteAutoAccepter:
         accept_invites_only_from_local_users = config.get(
             "accept_invites_only_from_local_users", False
         )
+        accept_invites_only_from_previously_knocked_rooms = config.get(
+            "accept_invites_only_from_previously_knocked_rooms", False
+        )
 
         worker_to_run_on = config.get("worker_to_run_on", None)
 
         return InviteAutoAccepterConfig(
             accept_invites_only_for_direct_messages=accept_invites_only_for_direct_messages,
             accept_invites_only_from_local_users=accept_invites_only_from_local_users,
+            accept_invites_only_from_previously_knocked_rooms=accept_invites_only_from_previously_knocked_rooms,
             worker_to_run_on=worker_to_run_on,
         )
 
@@ -108,10 +113,18 @@ class InviteAutoAccepter:
             or is_from_local_user is True
         )
 
+        # Only accept invitations which the requester previously knocked if the configuration mandates it.
+        is_allowed_by_knock_rules = True
+        if self._config.accept_invites_only_from_previously_knocked_rooms:
+            is_allowed_by_knock_rules = await self._has_user_previously_knocked(
+                event.sender, event.room_id
+            )
+
         if (
             is_invite_for_local_user
             and is_allowed_by_direct_message_rules
             and is_allowed_by_local_user_rules
+            and is_allowed_by_knock_rules
         ):
             # Make the user join the room. We run this as a background process to circumvent a race condition
             # that occurs when responding to invites over federation (see https://github.com/matrix-org/synapse-auto-accept-invite/issues/12)
@@ -171,6 +184,59 @@ class InviteAutoAccepter:
         await self._api.account_data_manager.put_global(
             user_id, ACCOUNT_DATA_DIRECT_MESSAGE_LIST, dm_map
         )
+
+    async def _has_user_previously_knocked(self, user_id: str, room_id: str) -> bool:
+        """
+        Check if a user has previously knocked on a room by looking at room membership history.
+
+        Args:
+            user_id: The user ID to check for previous knocks
+            room_id: The room ID to check knock history for
+
+        Returns:
+            True if the user's most recent membership event is a "knock", False otherwise
+        """
+        try:
+            # Get the membership events for this user in this room
+            membership_events = await self._api.get_state_events_in_room(
+                room_id, types=[("m.room.member", user_id)]
+            )
+
+            if not membership_events:
+                return False
+
+            # Sort events by origin_server_ts to find the most recent one
+            # Events should have an origin_server_ts attribute for ordering
+            sorted_events = sorted(
+                membership_events,
+                key=lambda event: getattr(event, "origin_server_ts", 0),
+                reverse=True,
+            )
+
+            # Check if the most recent event is a "knock"
+            most_recent_event = sorted_events[0]
+
+            if (
+                hasattr(most_recent_event, "membership")
+                and most_recent_event.membership == "knock"
+            ):
+                return True
+            elif (
+                hasattr(most_recent_event, "content")
+                and most_recent_event.content.get("membership") == "knock"
+            ):
+                return True
+
+            return False
+        except Exception as e:
+            # If we can't determine knock history, err on the side of caution
+            logger.warning(
+                "Unable to determine knock history for user %s in room %s: %s",
+                user_id,
+                room_id,
+                e,
+            )
+            return False
 
     async def _retry_make_join(
         self, sender: str, target: str, room_id: str, new_membership: str

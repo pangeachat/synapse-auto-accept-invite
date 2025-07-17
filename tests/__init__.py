@@ -31,6 +31,7 @@ class MockEvent:
     content: Dict[str, Any]
     room_id: str = "!someroom"
     state_key: Optional[str] = None
+    origin_server_ts: Optional[int] = None
 
     def is_state(self) -> bool:
         """Checks if the event is a state event by checking if it has a state key."""
@@ -73,6 +74,9 @@ def create_module(
     module_api.is_mine.side_effect = lambda a: a.split(":")[1] == "test"
     module_api.worker_name = worker_name
     module_api.sleep.return_value = make_multiple_awaitable(None)
+    # Add get_room_state_events method to the mock (not in the original spec)
+    module_api.get_room_state_events = Mock()
+    module_api.get_room_state_events.return_value = make_awaitable([])
 
     config = InviteAutoAccepter.parse_config(config_override)
 
